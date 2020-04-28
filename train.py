@@ -20,31 +20,41 @@ from model import Model
 from roi.pooler import Pooler
 
 
-def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to_checkpoints_dir: str, path_to_resuming_checkpoint: Optional[str]):
-    dataset = DatasetBase.from_name(dataset_name)(path_to_data_dir, DatasetBase.Mode.TRAIN, Config.IMAGE_MIN_SIDE, Config.IMAGE_MAX_SIDE)
+def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to_checkpoints_dir: str,
+           path_to_resuming_checkpoint: Optional[str]):
+    # child class for torch.utils.data.dataset.Dataset
+    dataset = DatasetBase.from_name(dataset_name)(path_to_data_dir, DatasetBase.Mode.TRAIN, Config.IMAGE_MIN_SIDE,
+                                                  Config.IMAGE_MAX_SIDE)
+    # iterable data_loader
     dataloader = DataLoader(dataset, batch_size=Config.BATCH_SIZE,
-                            sampler=DatasetBase.NearestRatioRandomSampler(dataset.image_ratios, num_neighbors=Config.BATCH_SIZE),
+                            sampler=DatasetBase.NearestRatioRandomSampler(dataset.image_ratios,
+                                                                          num_neighbors=Config.BATCH_SIZE),
                             num_workers=8, collate_fn=DatasetBase.padding_collate_fn, pin_memory=True)
 
     Log.i('Found {:d} samples'.format(len(dataset)))
-
+    # for feature extraction
     backbone = BackboneBase.from_name(backbone_name)(pretrained=True)
+    # for multiple GPUs training
     model = nn.DataParallel(
         Model(
             backbone, dataset.num_classes(), pooler_mode=Config.POOLER_MODE,
             anchor_ratios=Config.ANCHOR_RATIOS, anchor_sizes=Config.ANCHOR_SIZES,
             rpn_pre_nms_top_n=Config.RPN_PRE_NMS_TOP_N, rpn_post_nms_top_n=Config.RPN_POST_NMS_TOP_N,
-            anchor_smooth_l1_loss_beta=Config.ANCHOR_SMOOTH_L1_LOSS_BETA, proposal_smooth_l1_loss_beta=Config.PROPOSAL_SMOOTH_L1_LOSS_BETA
+            anchor_smooth_l1_loss_beta=Config.ANCHOR_SMOOTH_L1_LOSS_BETA,
+            proposal_smooth_l1_loss_beta=Config.PROPOSAL_SMOOTH_L1_LOSS_BETA
         ).cuda()
     )
     optimizer = optim.SGD(model.parameters(), lr=Config.LEARNING_RATE,
                           momentum=Config.MOMENTUM, weight_decay=Config.WEIGHT_DECAY)
+    # warm up learning rate for better map
     scheduler = WarmUpMultiStepLR(optimizer, milestones=Config.STEP_LR_SIZES, gamma=Config.STEP_LR_GAMMA,
                                   factor=Config.WARM_UP_FACTOR, num_iters=Config.WARM_UP_NUM_ITERS)
 
     step = 0
     time_checkpoint = time.time()
     losses = deque(maxlen=100)
+
+    # tensorboard --logdir='./summaries/'
     summary_writer = SummaryWriter(os.path.join(path_to_checkpoints_dir, 'summaries'))
     should_stop = False
 
@@ -63,24 +73,30 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
 
     while not should_stop:
         for _, (_, image_batch, _, bboxes_batch, labels_batch) in enumerate(dataloader):
+            # image_batch: [batch_size,C,H,W]
+            # bboxes_batch: [batch_size,K,4]
+            # labels_batch: [batch_size,K,1]
+            # K: number of bounding boxes in an image
             batch_size = image_batch.shape[0]
             image_batch = image_batch.cuda()
             bboxes_batch = bboxes_batch.cuda()
             labels_batch = labels_batch.cuda()
-
+            # forward and loss calculation
             anchor_objectness_losses, anchor_transformer_losses, proposal_class_losses, proposal_transformer_losses = \
                 model.train().forward(image_batch, bboxes_batch, labels_batch)
+
             anchor_objectness_loss = anchor_objectness_losses.mean()
             anchor_transformer_loss = anchor_transformer_losses.mean()
             proposal_class_loss = proposal_class_losses.mean()
             proposal_transformer_loss = proposal_transformer_losses.mean()
-            loss = anchor_objectness_loss + anchor_transformer_loss + proposal_class_loss + proposal_transformer_loss
 
+            loss = anchor_objectness_loss + anchor_transformer_loss + proposal_class_loss + proposal_transformer_loss
+            # backward propagation
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             scheduler.step()
-
+            # for avg_loss calculation
             losses.append(loss.item())
             summary_writer.add_scalar('train/anchor_objectness_loss', anchor_objectness_loss.item(), step)
             summary_writer.add_scalar('train/anchor_transformer_loss', anchor_transformer_loss.item(), step)
@@ -100,7 +116,8 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
                 eta = (num_steps_to_finish - step) / steps_per_sec / 3600
                 avg_loss = sum(losses) / len(losses)
                 lr = scheduler.get_lr()[0]
-                Log.i(f'[Step {step}] Avg. Loss = {avg_loss:.6f}, Learning Rate = {lr:.8f} ({samples_per_sec:.2f} samples/sec; ETA {eta:.1f} hrs)')
+                Log.i(
+                    f'[Step {step}] Avg. Loss = {avg_loss:.6f}, Learning Rate = {lr:.8f} ({samples_per_sec:.2f} samples/sec; ETA {eta:.1f} hrs)')
 
             if step % num_steps_to_snapshot == 0 or should_stop:
                 path_to_checkpoint = model.module.save(path_to_checkpoints_dir, step, optimizer, scheduler)
@@ -115,8 +132,10 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
 if __name__ == '__main__':
     def main():
         parser = argparse.ArgumentParser()
-        parser.add_argument('-s', '--dataset', type=str, choices=DatasetBase.OPTIONS, required=True, help='name of dataset')
-        parser.add_argument('-b', '--backbone', type=str, choices=BackboneBase.OPTIONS, required=True, help='name of backbone model')
+        parser.add_argument('-s', '--dataset', type=str, choices=DatasetBase.OPTIONS, required=True,
+                            help='name of dataset')
+        parser.add_argument('-b', '--backbone', type=str, choices=BackboneBase.OPTIONS, required=True,
+                            help='name of backbone model')
         parser.add_argument('-d', '--data_dir', type=str, default='./data', help='path to data directory')
         parser.add_argument('-o', '--outputs_dir', type=str, default='./outputs', help='path to outputs directory')
         parser.add_argument('-r', '--resume_checkpoint', type=str, help='path to resuming checkpoint')
@@ -124,11 +143,14 @@ if __name__ == '__main__':
         parser.add_argument('--image_max_side', type=float, help='default: {:g}'.format(Config.IMAGE_MAX_SIDE))
         parser.add_argument('--anchor_ratios', type=str, help='default: "{!s}"'.format(Config.ANCHOR_RATIOS))
         parser.add_argument('--anchor_sizes', type=str, help='default: "{!s}"'.format(Config.ANCHOR_SIZES))
-        parser.add_argument('--pooler_mode', type=str, choices=Pooler.OPTIONS, help='default: {.value:s}'.format(Config.POOLER_MODE))
+        parser.add_argument('--pooler_mode', type=str, choices=Pooler.OPTIONS,
+                            help='default: {.value:s}'.format(Config.POOLER_MODE))
         parser.add_argument('--rpn_pre_nms_top_n', type=int, help='default: {:d}'.format(Config.RPN_PRE_NMS_TOP_N))
         parser.add_argument('--rpn_post_nms_top_n', type=int, help='default: {:d}'.format(Config.RPN_POST_NMS_TOP_N))
-        parser.add_argument('--anchor_smooth_l1_loss_beta', type=float, help='default: {:g}'.format(Config.ANCHOR_SMOOTH_L1_LOSS_BETA))
-        parser.add_argument('--proposal_smooth_l1_loss_beta', type=float, help='default: {:g}'.format(Config.PROPOSAL_SMOOTH_L1_LOSS_BETA))
+        parser.add_argument('--anchor_smooth_l1_loss_beta', type=float,
+                            help='default: {:g}'.format(Config.ANCHOR_SMOOTH_L1_LOSS_BETA))
+        parser.add_argument('--proposal_smooth_l1_loss_beta', type=float,
+                            help='default: {:g}'.format(Config.PROPOSAL_SMOOTH_L1_LOSS_BETA))
         parser.add_argument('--batch_size', type=int, help='default: {:g}'.format(Config.BATCH_SIZE))
         parser.add_argument('--learning_rate', type=float, help='default: {:g}'.format(Config.LEARNING_RATE))
         parser.add_argument('--momentum', type=float, help='default: {:g}'.format(Config.MOMENTUM))
@@ -137,8 +159,10 @@ if __name__ == '__main__':
         parser.add_argument('--step_lr_gamma', type=float, help='default: {:g}'.format(Config.STEP_LR_GAMMA))
         parser.add_argument('--warm_up_factor', type=float, help='default: {:g}'.format(Config.WARM_UP_FACTOR))
         parser.add_argument('--warm_up_num_iters', type=int, help='default: {:d}'.format(Config.WARM_UP_NUM_ITERS))
-        parser.add_argument('--num_steps_to_display', type=int, help='default: {:d}'.format(Config.NUM_STEPS_TO_DISPLAY))
-        parser.add_argument('--num_steps_to_snapshot', type=int, help='default: {:d}'.format(Config.NUM_STEPS_TO_SNAPSHOT))
+        parser.add_argument('--num_steps_to_display', type=int,
+                            help='default: {:d}'.format(Config.NUM_STEPS_TO_DISPLAY))
+        parser.add_argument('--num_steps_to_snapshot', type=int,
+                            help='default: {:d}'.format(Config.NUM_STEPS_TO_SNAPSHOT))
         parser.add_argument('--num_steps_to_finish', type=int, help='default: {:d}'.format(Config.NUM_STEPS_TO_FINISH))
         args = parser.parse_args()
 
@@ -155,11 +179,14 @@ if __name__ == '__main__':
         Config.setup(image_min_side=args.image_min_side, image_max_side=args.image_max_side,
                      anchor_ratios=args.anchor_ratios, anchor_sizes=args.anchor_sizes, pooler_mode=args.pooler_mode,
                      rpn_pre_nms_top_n=args.rpn_pre_nms_top_n, rpn_post_nms_top_n=args.rpn_post_nms_top_n,
-                     anchor_smooth_l1_loss_beta=args.anchor_smooth_l1_loss_beta, proposal_smooth_l1_loss_beta=args.proposal_smooth_l1_loss_beta,
-                     batch_size=args.batch_size, learning_rate=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay,
+                     anchor_smooth_l1_loss_beta=args.anchor_smooth_l1_loss_beta,
+                     proposal_smooth_l1_loss_beta=args.proposal_smooth_l1_loss_beta,
+                     batch_size=args.batch_size, learning_rate=args.learning_rate, momentum=args.momentum,
+                     weight_decay=args.weight_decay,
                      step_lr_sizes=args.step_lr_sizes, step_lr_gamma=args.step_lr_gamma,
                      warm_up_factor=args.warm_up_factor, warm_up_num_iters=args.warm_up_num_iters,
-                     num_steps_to_display=args.num_steps_to_display, num_steps_to_snapshot=args.num_steps_to_snapshot, num_steps_to_finish=args.num_steps_to_finish)
+                     num_steps_to_display=args.num_steps_to_display, num_steps_to_snapshot=args.num_steps_to_snapshot,
+                     num_steps_to_finish=args.num_steps_to_finish)
 
         Log.initialize(os.path.join(path_to_checkpoints_dir, 'train.log'))
         Log.i('Arguments:')
@@ -168,5 +195,6 @@ if __name__ == '__main__':
         Log.i(Config.describe())
 
         _train(dataset_name, backbone_name, path_to_data_dir, path_to_checkpoints_dir, path_to_resuming_checkpoint)
+
 
     main()
