@@ -648,8 +648,8 @@ An easy implementation of [Faster R-CNN](https://arxiv.org/pdf/1506.01497.pdf) i
 
 
 ## Notes
-*If you want to train on your own data, it can be done by
-
+* If you want to train on your own data, it can be done by
+```
 Copy dataset/coco2017.py to dataset/coco2017-custom.py (or whatever you want)
 Change all COCO2017 to COCO2017Custom, for example:
 class COCO2017(Base) -> class COCO2017Custom(Base)
@@ -660,7 +660,7 @@ In dataset/base.py, append a new branch under from_name function
 elif name == 'coco2017-custom':
     from dataset.coco2017_custom import COCO2017Custom
     return COCO2017Custom
-
+```
 * Illustration for "find labels for each `anchor_bboxes`" in `region_proposal_network.py`
 
     ![](images/rpn_find_labels_1.png)
