@@ -76,7 +76,7 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
             # image_batch: [batch_size,C,H,W]
             # bboxes_batch: [batch_size,K,4]
             # labels_batch: [batch_size,K,1]
-            # K: number of bounding boxes in an image
+            # K: number of gt_bounding boxes in an image
             batch_size = image_batch.shape[0]
             image_batch = image_batch.cuda()
             bboxes_batch = bboxes_batch.cuda()
