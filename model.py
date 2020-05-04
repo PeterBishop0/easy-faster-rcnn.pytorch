@@ -14,7 +14,19 @@ from roi.pooler import Pooler
 from rpn.region_proposal_network import RegionProposalNetwork
 from support.layer.nms import nms
 
-
+'''
+Basic Model of Faster R-CNN
+Args:
+    backbone: modules of backbone for feature extraction
+    num_classes: number of classes including bg and fg
+    pooler_mode: OPTIONS = ['pooling', 'align']
+    anchor_ratios: [(1, 2), (1, 1), (2, 1)](default: height/width)
+    anchor_sizes: [128, 256, 512](default: rectangle)
+    rpn_pre_nms_top_n: number of roi to keep pre nms
+    rpn_post_nms_top_n: number of roi to keep after nms
+    anchor_smooth_l1_loss_beta: Beta for rpn
+    proposal_smooth_l1_loss_beta: Beta for detection
+'''
 class Model(nn.Module):
 
     def __init__(self, backbone: BackboneBase, num_classes: int, pooler_mode: Pooler.Mode,
@@ -24,6 +36,7 @@ class Model(nn.Module):
         super().__init__()
 
         self.features, hidden, num_features_out, num_hidden_out = backbone.features()
+
         self._bn_modules = nn.ModuleList([it for it in self.features.modules() if isinstance(it, nn.BatchNorm2d)] +
                                          [it for it in hidden.modules() if isinstance(it, nn.BatchNorm2d)])
 
@@ -43,17 +56,18 @@ class Model(nn.Module):
         # disable gradient for each forwarding process just in case model was switched to `train` mode at any time
         for bn_module in self._bn_modules:
             bn_module.eval()
-
+        # features extraction
         features = self.features(image_batch)
 
         batch_size, _, image_height, image_width = image_batch.shape
         _, _, features_height, features_width = features.shape
-
+        # generate pre-set anchors based on feature map pixels
         anchor_bboxes = self.rpn.generate_anchors(image_width, image_height, num_x_anchors=features_width, num_y_anchors=features_height).to(features).repeat(batch_size, 1, 1)
-
         if self.training:
             anchor_objectnesses, anchor_transformers, anchor_objectness_losses, anchor_transformer_losses = self.rpn.forward(features, anchor_bboxes, gt_bboxes_batch, image_width, image_height)
+            # After refine offsets, we get proposal_bboxes padded to same size
             proposal_bboxes = self.rpn.generate_proposals(anchor_bboxes, anchor_objectnesses, anchor_transformers, image_width, image_height).detach()  # it's necessary to detach `proposal_bboxes` here
+            # proposal forward
             proposal_classes, proposal_transformers, proposal_class_losses, proposal_transformer_losses = self.detection.forward(features, proposal_bboxes, gt_classes_batch, gt_bboxes_batch)
             return anchor_objectness_losses, anchor_transformer_losses, proposal_class_losses, proposal_transformer_losses
         else:
@@ -116,14 +130,16 @@ class Model(nn.Module):
                 return proposal_classes, proposal_transformers
             else:
                 # find labels for each `proposal_bboxes`
+                # labels： [batch_size,K（num of proposal_bboxes）]
                 labels = torch.full((batch_size, proposal_bboxes.shape[1]), -1, dtype=torch.long, device=proposal_bboxes.device)
+                # ious： [batch_size,K（num of proposal_bboxes）,N（num of gt_bboxes）]
                 ious = BBox.iou(proposal_bboxes, gt_bboxes_batch)
                 proposal_max_ious, proposal_assignments = ious.max(dim=2)
                 labels[proposal_max_ious < 0.5] = 0
                 fg_masks = proposal_max_ious >= 0.5
+                # assign class_id label or remain -1 by corresponding to gt_bbox_id
                 if len(fg_masks.nonzero()) > 0:
                     labels[fg_masks] = gt_classes_batch[fg_masks.nonzero()[:, 0], proposal_assignments[fg_masks]]
-
                 # select 128 x `batch_size` samples
                 fg_indices = (labels > 0).nonzero()
                 bg_indices = (labels == 0).nonzero()
@@ -137,7 +153,7 @@ class Model(nn.Module):
                 gt_proposal_classes = labels[selected_indices]
                 gt_proposal_transformers = BBox.calc_transformer(proposal_bboxes, gt_bboxes)
                 batch_indices = selected_indices[0]
-
+                # Align for better segmentation
                 pool = Pooler.apply(features, proposal_bboxes, proposal_batch_indices=batch_indices, mode=self._pooler_mode)
                 hidden = self.hidden(pool)
                 hidden = F.adaptive_max_pool2d(input=hidden, output_size=1)
