@@ -52,24 +52,30 @@ class BBox(object):
 
     @staticmethod
     def apply_transformer(src_bboxes: Tensor, transformers: Tensor) -> Tensor:
+        #(X_min,Y_min,X_max,Y_max)->(X_center,Y_center,w,h)
         center_based_src_bboxes = BBox.to_center_base(src_bboxes)
+        #Apply transforms
         center_based_dst_bboxes = torch.stack([
             transformers[..., 0] * center_based_src_bboxes[..., 2] + center_based_src_bboxes[..., 0],
             transformers[..., 1] * center_based_src_bboxes[..., 3] + center_based_src_bboxes[..., 1],
             torch.exp(transformers[..., 2]) * center_based_src_bboxes[..., 2],
             torch.exp(transformers[..., 3]) * center_based_src_bboxes[..., 3]
         ], dim=-1)
+        # (X_center,Y_center,w,h)->(X_min,Y_min,X_max,Y_max)
         dst_bboxes = BBox.from_center_base(center_based_dst_bboxes)
         return dst_bboxes
 
     @staticmethod
     def iou(source: Tensor, other: Tensor) -> Tensor:
+        # source: [batch_size,K(num of anchors),4]
+        # other(gt): [batch_size,N(num of gt_bboxes),4]
+        # expand source and other to a same shape as to calculation IoU, mostly repeating other to fit source
         source, other = source.unsqueeze(dim=-2).repeat(1, 1, other.shape[-2], 1), \
                         other.unsqueeze(dim=-3).repeat(1, source.shape[-2], 1, 1)
 
         source_area = (source[..., 2] - source[..., 0]) * (source[..., 3] - source[..., 1])
         other_area = (other[..., 2] - other[..., 0]) * (other[..., 3] - other[..., 1])
-
+        # IoU calculation
         intersection_left = torch.max(source[..., 0], other[..., 0])
         intersection_top = torch.max(source[..., 1], other[..., 1])
         intersection_right = torch.min(source[..., 2], other[..., 2])
